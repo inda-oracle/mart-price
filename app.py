@@ -9,9 +9,9 @@ st.title("🛒 전국 마트 식자재 실시간 가격 검색기")
 @st.cache_data
 def load_data():
     try:
-        df = pd.read_csv("adress.csv", encoding='cp949') 
+        df = pd.read_csv("adress.zip", encoding='cp949') 
     except:
-        df = pd.read_csv("adress.csv", encoding='utf-8')
+        df = pd.read_csv("adress.zip", encoding='utf-8')
     
     # 3. 비식품 강력 필터링
     non_food_keywords = [
