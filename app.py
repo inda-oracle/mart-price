@@ -9,9 +9,9 @@ st.title("🛒 전국 마트 식자재 실시간 가격 검색기")
 @st.cache_data
 def load_data():
     try:
-        df = pd.read_csv("data.csv", encoding='cp949') 
+        df = pd.read_csv("adress.csv", encoding='cp949') 
     except:
-        df = pd.read_csv("data.csv", encoding='utf-8')
+        df = pd.read_csv("adress.csv", encoding='utf-8')
     
     # 3. 비식품 강력 필터링
     non_food_keywords = [
@@ -55,10 +55,18 @@ def load_data():
             return '🛒 10. 기타 식자재'
             
     df['카테고리'] = df['상품명'].apply(categorize)
-    
-    # 용량 추출 컬럼 추가
     df['용량'] = df['상품명'].str.extract(r'(?i)([0-9.]+\s*(?:ml|l|g|kg|개|개입|매|캔|팩|봉|인|롤))', expand=False)
     df['용량'] = df['용량'].fillna('단일규격/기타') 
+    
+    if '주소' in df.columns:
+        df['주소'] = df['주소'].fillna("주소 미상")
+        df['시도'] = df['주소'].apply(lambda x: str(x).split()[0] if len(str(x).split()) > 0 else '미상')
+        df['시군구'] = df['주소'].apply(lambda x: str(x).split()[1] if len(str(x).split()) > 1 else '미상')
+        df['표시용_매장명'] = df['판매업소'] + " (" + df['주소'] + ")"
+    else:
+        df['시도'] = '전체 지역'
+        df['시군구'] = '전체 지역'
+        df['표시용_매장명'] = df['판매업소']
     
     df = df.drop_duplicates(subset=['판매업소', '상품명', '판매가격'])
     return df
@@ -66,16 +74,43 @@ def load_data():
 try:
     df = load_data()
     
-    tab1, tab2 = st.tabs(["🏪 특정 마트 지점 안에서 검색", "🔍 상품명으로 전국 최저가 찾기"])
+    tab1, tab2 = st.tabs(["🏪 지역별 마트 지점 검색", "🔍 상품명으로 전국 최저가 찾기"])
     
     with tab1:
-        st.subheader("선택한 마트의 취급 상품 및 가격")
-        store_list = sorted(df['판매업소'].unique())
-        selected_store = st.selectbox("검색할 마트나 상점을 선택하세요", store_list)
+        st.subheader("1. 지역 및 마트를 순서대로 선택하세요")
         
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            sido_list = sorted(df['시도'].unique())
+            selected_sido = st.selectbox("📌 1. 시/도 선택", sido_list)
+        with col2:
+            sigungu_list = sorted(df[df['시도'] == selected_sido]['시군구'].unique())
+            selected_sigungu = st.selectbox("📌 2. 시/군/구 선택", sigungu_list)
+        with col3:
+            store_list = sorted(df[(df['시도'] == selected_sido) & (df['시군구'] == selected_sigungu)]['표시용_매장명'].unique())
+            selected_store = st.selectbox("🛒 3. 마트 선택", store_list)
+        
+        st.write("---")
+        
+        if " (" in selected_store:
+            clean_store_name = selected_store.split(" (")[0]
+            store_address = selected_store.split(" (")[1].replace(")", "")
+        else:
+            clean_store_name = selected_store
+            store_address = "주소 미상"
+            
+        # 💡 [정렬 개선] 마트명과 주소를 깔끔한 수직 구조로 정돈된 마크다운 상자에 표시
+        st.markdown(f"""
+        <div style="padding: 15px; border-radius: 8px; background-color: #f0f2f6; border-left: 5px solid #ff4b4b; margin-bottom: 20px;">
+            <p style="margin: 0; font-size: 16px; font-weight: bold; color: #111;">🏪 선택 매장: {clean_store_name}</p>
+            <p style="margin: 5px 0 0 0; font-size: 14px; color: #555;">📍 상세 주소: {store_address}</p>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        st.subheader(f"[{clean_store_name}] 취급 상품 및 가격")
         search_keyword_1 = st.text_input("찾으시는 상품 이름을 입력하세요 (예: 달걀, 삼겹살)", key="search1")
         
-        store_df = df[df['판매업소'] == selected_store]
+        store_df = df[df['표시용_매장명'] == selected_store]
         if search_keyword_1:
             store_df = store_df[store_df['상품명'].str.contains(search_keyword_1, na=False)]
         
@@ -95,7 +130,6 @@ try:
             if len(item_df) == 0:
                 st.warning(f"'{search_keyword_2}'(으)로 검색된 상품이 없습니다.")
             else:
-                # 1. 상단 표: '용량별' 전체 물가 요약 (브랜드 무관 통합)
                 summary_df = item_df.groupby('용량').agg(
                     전국평균가=('판매가격', 'mean'),
                     전국최저가=('판매가격', 'min'),
@@ -113,30 +147,27 @@ try:
                 
                 st.divider()
                 
-                # 2. 하단 상세: '특정 제품명별' 최저가 지점 찾기 (이전 방식 복구)
                 st.markdown("##### 🛒 특정 상품의 브랜드별 최저가 지점 찾기")
                 matched_products = sorted(item_df['상품명'].unique())
                 exact_product = st.selectbox("🎯 정확한 상품(브랜드+용량)을 선택하세요", matched_products)
                 
-                # 선택한 정확한 상품명으로 필터링
                 exact_df = item_df[item_df['상품명'] == exact_product]
                 
                 avg_price = int(exact_df['판매가격'].mean())
                 min_price = int(exact_df['판매가격'].min())
                 max_price = int(exact_df['판매가격'].max())
                 
-                # 요약 지표 출력
                 st.markdown(f"**[{exact_product}] 전국 물가 요약**")
                 col1, col2, col3 = st.columns(3)
                 col1.metric("전국 평균가", f"{avg_price:,} 원")
                 col2.metric("전국 최저가", f"{min_price:,} 원")
                 col3.metric("전국 최고가", f"{max_price:,} 원")
                 
-                # 해당 제품을 파는 마트 리스트 출력 (최저가 순 정렬)
-                display_item_df = exact_df[['상품명', '판매가격', '판매업소']].sort_values(by=['판매가격', '판매업소'])
+                display_item_df = exact_df[['상품명', '판매가격', '표시용_매장명']].sort_values(by=['판매가격', '표시용_매장명'])
+                display_item_df = display_item_df.rename(columns={'표시용_매장명': '판매처(주소)'})
                 st.dataframe(display_item_df, use_container_width=True, hide_index=True)
         else:
             st.info("검색창에 상품명을 입력하시면, 상단에는 용량별 평균이, 하단에는 개별 제품의 최저가 정보가 나타납니다.")
 
 except Exception as e:
-    st.error("데이터 파일을 찾을 수 없습니다. 'data.csv' 파일을 서버에 업로드해 주세요.")
+    st.error("데이터 파일을 찾을 수 없습니다. 'adress.csv' 파일을 서버에 업로드해 주세요.")
