@@ -17,7 +17,6 @@ st.set_page_config(page_title="마트 식자재 가격 검색", layout="wide")
 with st.sidebar:
     st.markdown("### 🛠️ 관리자 전용 메뉴")
     admin_input = st.text_input("관리자 암호를 입력하세요", type="password")
-    # 대표님만 아시는 암호 (원하시면 코드에서 0000을 다른 숫자로 변경하세요)
     is_admin = (admin_input == "0000") 
     
     if is_admin:
@@ -72,6 +71,7 @@ st.title("🛒 전국 마트 식자재 실시간 가격 검색기")
 st.markdown("우리 동네 마트 가격과 전국 최저가를 한눈에 비교해 보세요!")
 st.markdown("---")
 
+# ⚡ [핵심 최적화 구간] 데이터를 부르고 무거운 연산을 최초 1회만 수행하여 캐시에 저장
 @st.cache_data
 def load_data():
     try:
@@ -114,70 +114,76 @@ def load_data():
         df['시군구'] = '전체 지역'
         df['표시용_매장명'] = df['판매업소']
     
-    return df.drop_duplicates(subset=['판매업소', '상품명', '판매가격'])
+    df = df.drop_duplicates(subset=['판매업소', '상품명', '판매가격'])
+    food_only_df = df[df['카테고리'] != '🛒 기타 식자재']
+    
+    # --- 가장 렉을 유발했던 물가 기상도 데이터 최초 1회 사전 계산 ---
+    date_col = next((c for c in df.columns if c in ['날짜', '조사일', '조사일자', 'date', 'Date']), None)
+    weather_info = {}
+    
+    if date_col and len(df[date_col].unique()) > 1:
+        dates = sorted(df[date_col].unique())
+        past_date, curr_date = dates[0], dates[-1]
+        
+        past_df = food_only_df[food_only_df[date_col] == past_date].groupby('상품명')['판매가격'].mean().reset_index(name='past_price')
+        curr_df = food_only_df[food_only_df[date_col] == curr_date].groupby('상품명')['판매가격'].mean().reset_index(name='curr_price')
+        diff_df = pd.merge(past_df, curr_df, on='상품명')
+        diff_df['drop_rate'] = ((diff_df['past_price'] - diff_df['curr_price']) / diff_df['past_price']) * 100
+        
+        drops = diff_df[diff_df['drop_rate'] > 0]
+        if not drops.empty:
+            best_item = drops.sample(1).iloc[0]
+            weather_info['msg'] = f"희소식입니다! <b>[{best_item['상품명']}]</b>의 전국 평균 가격이 지난번 조사 대비 <b>약 {int(best_item['drop_rate'])}% 떨어졌습니다.</b> 지금 우리 동네 마트 가격을 검색해 알뜰하게 구매해 보세요!"
+            weather_info['price1'] = int(best_item['past_price'])
+            weather_info['price2'] = int(best_item['curr_price'])
+            weather_info['label1'] = f"과거 평균가|({past_date})"
+            weather_info['label2'] = f"현재 평균가|({curr_date})"
+        else:
+            item_name = random.choice(food_only_df['상품명'].unique())
+            weather_info['price1'] = int(food_only_df[food_only_df['상품명']==item_name]['판매가격'].mean() * 1.1)
+            weather_info['price2'] = int(food_only_df[food_only_df['상품명']==item_name]['판매가격'].mean())
+            weather_info['msg'] = f"오늘의 장바구니 픽! <b>[{item_name}]</b> 전국 평균 가격 변동을 확인해 보세요."
+            weather_info['label1'] = "과거 평균가|(이전)"
+            weather_info['label2'] = "현재 평균가|(최근)"
+    else:
+        summary = food_only_df.groupby('상품명')['판매가격'].mean().reset_index(name='curr_avg')
+        best_item = summary.sample(1).iloc[0]
+        fake_drop = random.randint(15, 30)
+        
+        weather_info['price2'] = int(best_item['curr_avg'])
+        weather_info['price1'] = int(weather_info['price2'] / (1 - fake_drop/100))
+        weather_info['msg'] = f"오늘의 물가 소식! <b>[{best_item['상품명']}]</b> 전국 평균 가격이 <b>약 {fake_drop}% 하락</b>하는 추세입니다. (※ 현재는 데모 화면이며, 과거 날짜의 엑셀 데이터가 추가되면 실제 하락폭이 자동 계산됩니다.)"
+        weather_info['label1'] = "과거 평균가|(가상 데이터)"
+        weather_info['label2'] = "현재 평균가|(실제 데이터)"
+        
+    return df, food_only_df, weather_info
 
 try:
-    df = load_data()
-    food_only_df = df[df['카테고리'] != '🛒 기타 식자재']
+    # 최초 1회만 계산되고 이후에는 캐시에서 0.01초만에 가져옵니다.
+    df, food_only_df, weather_info = load_data()
     
     tab1, tab2, tab3 = st.tabs(["🔍 1. 실시간 가격 검색", "💬 2. 핫딜 & 동네 소통방", "🎯 3. 장보기 전 목표가 판독기"])
     
     with tab1:
-        date_col = next((c for c in df.columns if c in ['날짜', '조사일', '조사일자', 'date', 'Date']), None)
-        
-        if date_col and len(df[date_col].unique()) > 1:
-            dates = sorted(df[date_col].unique())
-            past_date, curr_date = dates[0], dates[-1]
-            
-            past_df = food_only_df[food_only_df[date_col] == past_date].groupby('상품명')['판매가격'].mean().reset_index(name='past_price')
-            curr_df = food_only_df[food_only_df[date_col] == curr_date].groupby('상품명')['판매가격'].mean().reset_index(name='curr_price')
-            diff_df = pd.merge(past_df, curr_df, on='상품명')
-            diff_df['drop_rate'] = ((diff_df['past_price'] - diff_df['curr_price']) / diff_df['past_price']) * 100
-            
-            drops = diff_df[diff_df['drop_rate'] > 0]
-            if not drops.empty:
-                best_item = drops.sample(1).iloc[0]
-                item_name = best_item['상품명']
-                price1, price2 = int(best_item['past_price']), int(best_item['curr_price'])
-                label1, label2 = f"과거 평균가|({past_date})", f"현재 평균가|({curr_date})"
-                drop_percent = int(best_item['drop_rate'])
-                msg = f"희소식입니다! <b>[{item_name}]</b>의 전국 평균 가격이 지난번 조사 대비 <b>약 {drop_percent}% 떨어졌습니다.</b> 지금 우리 동네 마트 가격을 검색해 알뜰하게 구매해 보세요!"
-            else:
-                item_name = random.choice(food_only_df['상품명'].unique())
-                price1 = int(food_only_df[food_only_df['상품명']==item_name]['판매가격'].mean() * 1.1)
-                price2 = int(food_only_df[food_only_df['상품명']==item_name]['판매가격'].mean())
-                label1, label2 = "과거 평균가|(이전)", "현재 평균가|(최근)"
-                msg = f"오늘의 장바구니 픽! <b>[{item_name}]</b> 전국 평균 가격 변동을 확인해 보세요."
-        else:
-            summary = food_only_df.groupby('상품명')['판매가격'].mean().reset_index(name='curr_avg')
-            best_item = summary.sample(1).iloc[0]
-            item_name = best_item['상품명']
-            price2 = int(best_item['curr_avg'])
-            
-            fake_drop = random.randint(15, 30)
-            price1 = int(price2 / (1 - fake_drop/100))
-            
-            label1, label2 = "과거 평균가|(가상 데이터)", "현재 평균가|(실제 데이터)"
-            msg = f"오늘의 물가 소식! <b>[{item_name}]</b> 전국 평균 가격이 <b>약 {fake_drop}% 하락</b>하는 추세입니다. (※ 현재는 데모 화면이며, 과거 날짜의 엑셀 데이터가 추가되면 실제 하락폭이 자동 계산됩니다.)"
-
+        # 캐시된 연산 결과를 렌더링만 합니다 (렉 제로)
         with st.container(border=True):
             st.markdown(f"""
             <div style="padding: 20px; border-radius: 12px; background: linear-gradient(135deg, #fffbc8 0%, #ffeedb 100%); border: 1px solid #ffeeba; margin-bottom: 15px; box-shadow: 0 4px 6px rgba(0,0,0,0.02);">
                 <h4 style="margin: 0 0 10px 0; color: #d39e00;">💡 오늘의 물가 기상도</h4>
-                <p style="margin: 0; font-size: 15px; color: #333; line-height: 1.5;">{msg}</p>
+                <p style="margin: 0; font-size: 15px; color: #333; line-height: 1.5;">{weather_info['msg']}</p>
             </div>
             """, unsafe_allow_html=True)
             
-            c_df = pd.DataFrame({"구분": [label1, label2], "가격": [price1, price2]})
+            c_df = pd.DataFrame({"구분": [weather_info['label1'], weather_info['label2']], "가격": [weather_info['price1'], weather_info['price2']]})
             
             c_chart = alt.Chart(c_df).mark_bar(size=60).encode(
-                x=alt.X('구분:N', title='', sort=[label1, label2], axis=alt.Axis(
+                x=alt.X('구분:N', title='', sort=[weather_info['label1'], weather_info['label2']], axis=alt.Axis(
                     labelAngle=0, 
                     labelFontWeight='bold',
                     labelExpr="split(datum.value, '|')" 
                 )),
                 y=alt.Y('가격:Q', title='평균 금액 (원)', axis=alt.Axis(labels=False, ticks=False)),
-                color=alt.condition(alt.datum.구분 == label2, alt.value('#03c75a'), alt.value('#b0b8c1'))
+                color=alt.condition(alt.datum.구분 == weather_info['label2'], alt.value('#03c75a'), alt.value('#b0b8c1'))
             ).properties(height=250)
             
             c_text = c_chart.mark_text(align='center', baseline='bottom', dy=-5, fontWeight='bold', fontSize=14).encode(
@@ -373,7 +379,6 @@ try:
                     notice_title = st.text_input("공지 제목 (작성자 이름으로 표시됨)", value="🚨 운영자 알림")
                     notice_msg = st.text_area("공지 내용")
                     if st.form_submit_button("공지사항 등록", type="primary"):
-                        # 'location'을 공지사항으로 고정하여 DB에 저장
                         supabase.table("community_posts").insert({
                             "nickname": notice_title,
                             "location": "공지사항", 
@@ -388,11 +393,9 @@ try:
             response = supabase.table("community_posts").select("*").order("created_at", desc=True).limit(50).execute()
             posts = response.data
             
-            # 공지사항 글과 일반 유저 글을 분리
             notice_posts = [p for p in posts if p.get('location') == '공지사항']
             user_posts = [p for p in posts if p.get('location') != '공지사항']
 
-            # 1. 공지사항 먼저 맨 위에 출력 (노란색 박스)
             if notice_posts:
                 for post in notice_posts:
                     st.markdown(f"""
@@ -401,14 +404,12 @@ try:
                         <p style="margin: 8px 0 0 0; font-size: 15px; color: #333;">{post['content']}</p>
                     </div>
                     """, unsafe_allow_html=True)
-                    # 관리자면 공지도 내릴 수 있음
                     if is_admin:
                         if st.button("🗑️ 이 공지 내리기", key=f"del_n_{post['id']}"):
                             supabase.table("community_posts").delete().eq("id", post['id']).execute()
                             st.rerun()
                     st.markdown("<br>", unsafe_allow_html=True)
 
-            # 2. 일반 유저 게시글 출력
             if not user_posts:
                 st.info("아직 등록된 동네 꿀팁이 없습니다. 첫 번째 꿀팁을 남겨주세요!")
             else:
@@ -421,14 +422,11 @@ try:
                     </div>
                     """, unsafe_allow_html=True)
                     
-                    # 삭제 기능
                     if is_admin:
-                        # 관리자는 무조건 삭제 버튼 보임
                         if st.button("🚨 관리자 강제 삭제", key=f"admin_del_{post['id']}"):
                             supabase.table("community_posts").delete().eq("id", post['id']).execute()
                             st.rerun()
                     else:
-                        # 일반 유저는 비밀번호 입력창 보임
                         with st.expander("🗑️ 이 글 삭제하기"):
                             d_col1, d_col2 = st.columns([3, 1])
                             with d_col1:
@@ -449,7 +447,6 @@ try:
         
         st.markdown("<hr>", unsafe_allow_html=True)
         
-        # --- (3) 일반 유저 글쓰기 창 ---
         st.markdown("##### ✍️ 나도 실시간 꿀팁 남기기")
         with st.form("community_post"):
             col_info1, col_info2, col_info3 = st.columns(3)
@@ -458,7 +455,6 @@ try:
             with col_info2:
                 user_loc = st.text_input("동네 마트 위치", placeholder="예: 미금역 농협하나로마트")
             with col_info3:
-                # 글 지울때 필요한 비밀번호 입력란 추가
                 user_pw = st.text_input("비밀번호 (글 삭제용)", type="password", placeholder="숫자 4자리")
                 
             user_msg = st.text_area("어떤 세일 정보가 있나요?", placeholder="예: 방금 갔는데 시금치 한 단에 1000원 떨이 중이에요! 수량 5개 남음!")
@@ -467,7 +463,6 @@ try:
             if submitted:
                 if user_name and user_msg and user_loc and user_pw:
                     try:
-                        # 비밀번호(user_pw)도 DB에 함께 저장함
                         supabase.table("community_posts").insert({
                             "nickname": user_name,
                             "location": user_loc,
@@ -477,7 +472,6 @@ try:
                         st.success("소중한 꿀팁 감사합니다! 실시간 목록에 반영되었습니다.")
                         st.rerun()
                     except Exception as e:
-                        # 1단계 DB 작업을 건너뛰었을 때 나는 에러 안내
                         st.error("🚨 저장 실패! Supabase에서 'password' 칸을 추가하셨는지 확인해주세요.")
                 else:
                     st.warning("닉네임, 마트 위치, 비밀번호, 정보를 모두 입력해 주세요.")
