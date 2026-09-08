@@ -2,6 +2,8 @@ import streamlit as st
 import pandas as pd
 import random
 import altair as alt
+import re 
+from collections import Counter
 
 # 1. 사이트 기본 설정
 st.set_page_config(page_title="마트 식자재 가격 검색", layout="wide")
@@ -91,11 +93,12 @@ def load_data():
 
 try:
     df = load_data()
-    tab1, tab2, tab3 = st.tabs(["🛒 실시간 가격 검색", "📢 할인 행사 & 장날 소식", "🚨 동네 마감세일 제보(NEW)"])
+    food_only_df = df[df['카테고리'] != '🛒 기타 식자재']
+    
+    tab1, tab2, tab3 = st.tabs(["🔍 1. 실시간 가격 검색", "💬 2. 핫딜 & 동네 소통방", "🎯 3. 장보기 전 목표가 판독기"])
     
     with tab1:
         date_col = next((c for c in df.columns if c in ['날짜', '조사일', '조사일자', 'date', 'Date']), None)
-        food_only_df = df[df['카테고리'] != '🛒 기타 식자재']
         
         if date_col and len(df[date_col].unique()) > 1:
             dates = sorted(df[date_col].unique())
@@ -108,7 +111,6 @@ try:
             
             drops = diff_df[diff_df['drop_rate'] > 0]
             if not drops.empty:
-                # 💡 [핵심 수정] 하락한 상품 중 '랜덤'으로 하나를 골라 보여주도록 수정 (고정 방지)
                 best_item = drops.sample(1).iloc[0]
                 item_name = best_item['상품명']
                 price1, price2 = int(best_item['past_price']), int(best_item['curr_price'])
@@ -199,77 +201,116 @@ try:
         st.divider()
 
         st.subheader("🔍 2. 상품명 통합 검색")
-        global_search_keyword = st.text_input("찾으시는 상품을 입력하세요 (예: 달걀, 삼겹살)", placeholder="검색하시면 마트 가격과 전국 최저가가 동시 분석됩니다.")
+        
+        global_search_keyword = st.text_input("찾으시는 상품을 입력하세요 (예: 우유, 삼겹살)", placeholder="검색하시면 전국 마트 가격과 동시 분석됩니다.")
         
         if global_search_keyword:
-            st.markdown(f"#### 🛒 [{clean_store_name}] '{global_search_keyword}' 판매 가격")
-            store_df = df.copy()
-            if selected_sido != "전체": store_df = store_df[store_df['시도'] == selected_sido]
-            if selected_sigungu != "전체": store_df = store_df[store_df['시군구'] == selected_sigungu]
-            if selected_store != "전체": store_df = store_df[store_df['표시용_매장명'] == selected_store]
-                
-            store_search_df = store_df[store_df['상품명'].str.contains(global_search_keyword, na=False)]
-            if len(store_search_df) == 0: 
-                st.warning("해당 매장에는 검색하신 상품이 없습니다.")
+            base_mask = df['상품명'].str.contains(global_search_keyword, na=False)
+            base_item_df = df[base_mask]
+            
+            if len(base_item_df) == 0: 
+                st.warning("전국 매장에 검색하신 조건의 상품이 없습니다.")
             else:
-                display_cols = ['판매업소', '카테고리', '상품명', '판매가격'] if selected_store == "전체" else ['카테고리', '상품명', '판매가격']
-                display_df = store_search_df[display_cols].sort_values(by=['판매가격', '상품명'])
-                display_df['판매가격'] = display_df['판매가격'].apply(lambda x: f"{int(x):,} 원")
-                st.dataframe(display_df, use_container_width=True, hide_index=True)
+                word_counter = Counter()
+                for name in base_item_df['상품명'].unique():
+                    words = re.findall(r'[가-힣a-zA-Z]+', name)
+                    for w in words:
+                        if w != global_search_keyword and len(w) > 1:
+                            word_counter[w] += 1
+                
+                top_words = [w for w, count in word_counter.most_common(12)]
+                exclude_keywords = []
+                
+                if top_words:
+                    with st.expander("🚫 원하지 않는 상품이 섞여 있나요? (제외할 단어를 체크하세요)", expanded=True):
+                        cols = st.columns(6)
+                        for i, w in enumerate(top_words):
+                            if cols[i % 6].checkbox(w, key=f"exc_{w}"):
+                                exclude_keywords.append(w)
+                
+                store_df = df.copy()
+                if selected_sido != "전체": store_df = store_df[store_df['시도'] == selected_sido]
+                if selected_sigungu != "전체": store_df = store_df[store_df['시군구'] == selected_sigungu]
+                if selected_store != "전체": store_df = store_df[store_df['표시용_매장명'] == selected_store]
+                    
+                store_mask = store_df['상품명'].str.contains(global_search_keyword, na=False)
+                
+                for ex in exclude_keywords:
+                    store_mask &= ~store_df['상품명'].str.contains(ex, na=False)
+                    base_mask &= ~df['상품명'].str.contains(ex, na=False)
+                        
+                store_search_df = store_df[store_mask]
+                
+                st.markdown(f"#### 🛒 [{clean_store_name}] '{global_search_keyword}' 판매 가격")
+                if len(store_search_df) == 0: 
+                    st.warning("해당 매장에는 검색/제외 조건에 맞는 상품이 없습니다.")
+                else:
+                    display_cols = ['판매업소', '카테고리', '상품명', '판매가격'] if selected_store == "전체" else ['카테고리', '상품명', '판매가격']
+                    display_df = store_search_df[display_cols].sort_values(by=['판매가격', '상품명'])
+                    display_df['판매가격'] = display_df['판매가격'].apply(lambda x: f"{int(x):,} 원")
+                    st.dataframe(display_df, use_container_width=True, hide_index=True)
 
-            item_df = df[df['상품명'].str.contains(global_search_keyword, na=False)]
-            if len(item_df) > 0:
-                st.markdown(f"#### 📊 '{global_search_keyword}' 전국 최저/최고가 분석")
+                item_df = df[base_mask]
                 
-                summary_df = item_df.groupby('용량').agg(
-                    전국평균가=('판매가격', 'mean'), 
-                    전국최저가=('판매가격', 'min'), 
-                    전국최고가=('판매가격', 'max'), 
-                    판매지점수=('판매업소', 'count')
-                ).reset_index()
-                
-                st.markdown("##### 📈 용량별 가격 비교 차트")
-                chart_data = summary_df[['용량', '전국최저가', '전국평균가', '전국최고가']].melt('용량', var_name='구분', value_name='가격')
-                
-                main_chart = alt.Chart(chart_data).mark_bar().encode(
-                    x=alt.X('용량:N', title='용량 기준', axis=alt.Axis(labelAngle=0)),
-                    xOffset='구분:N',
-                    y=alt.Y('가격:Q', title='가격 (원)'),
-                    color=alt.Color('구분:N', title='가격 종류', scale=alt.Scale(domain=['전국최저가', '전국평균가', '전국최고가'], range=['#03c75a', '#ffc107', '#ff4b4b'])),
-                    tooltip=['용량', '구분', alt.Tooltip('가격', format=',')]
-                ).properties(height=350)
-                
-                st.altair_chart(main_chart, use_container_width=True)
-                
-                summary_df = summary_df.sort_values(by='용량')
-                summary_df['전국평균가'] = summary_df['전국평균가'].apply(lambda x: f"{int(x):,} 원")
-                summary_df['전국최저가'] = summary_df['전국최저가'].apply(lambda x: f"{int(x):,} 원")
-                summary_df['전국최고가'] = summary_df['전국최고가'].apply(lambda x: f"{int(x):,} 원")
-                summary_df['판매지점수'] = summary_df['판매지점수'].apply(lambda x: f"{int(x):,} 곳")
-                
-                st.markdown("##### 📝 데이터 요약표")
-                st.dataframe(summary_df, use_container_width=True, hide_index=True)
-                
-                st.markdown("##### 🏆 특정 브랜드 최저가 매장 찾기")
-                exact_product = st.selectbox("🎯 정확한 상품을 선택하세요", sorted(item_df['상품명'].unique()))
-                exact_df = item_df[item_df['상품명'] == exact_product]
-                
-                display_item_df = exact_df[['상품명', '판매가격', '표시용_매장명']].sort_values(by='판매가격')
-                display_item_df = display_item_df.rename(columns={'표시용_매장명': '판매처'})
-                display_item_df['판매가격'] = display_item_df['판매가격'].apply(lambda x: f"{int(x):,} 원")
-                
-                display_item_df['지도보기'] = display_item_df['판매처'].apply(
-                    lambda x: f"https://map.naver.com/v5/search/{x.split(' (')[0]}"
-                )
-                
-                st.dataframe(
-                    display_item_df,
-                    column_config={
-                        "지도보기": st.column_config.LinkColumn("🗺️ 매장 위치", display_text="[ 📍 지도 열기 ]")
-                    },
-                    use_container_width=True, 
-                    hide_index=True
-                )
+                if len(item_df) > 0:
+                    st.markdown(f"#### 📊 '{global_search_keyword}' 전국 최저/최고가 분석")
+                    
+                    summary_df = item_df.groupby(['상품명', '용량']).agg(
+                        전국평균가=('판매가격', 'mean'), 
+                        전국최저가=('판매가격', 'min'), 
+                        전국최고가=('판매가격', 'max'), 
+                        판매지점수=('판매업소', 'count')
+                    ).reset_index()
+                    
+                    summary_df = summary_df.sort_values(by=['상품명', '용량']).reset_index(drop=True)
+                    
+                    # 💡 [번호 매칭 완벽 동기화] 차트와 표 모두 '1번', '2번' 형태로 직관성 통일
+                    summary_df.insert(0, '차트 번호', [f"{i}번" for i in range(1, len(summary_df) + 1)])
+                    
+                    st.markdown("##### 📈 상품별 전국 가격 비교 차트")
+                    
+                    chart_data = summary_df[['차트 번호', '상품명', '용량', '전국최저가', '전국평균가', '전국최고가']].melt(id_vars=['차트 번호', '상품명', '용량'], var_name='구분', value_name='가격')
+                    
+                    main_chart = alt.Chart(chart_data).mark_bar().encode(
+                        x=alt.X('차트 번호:N', title='상품 번호 (아래 데이터 요약표 참고)', sort=summary_df['차트 번호'].tolist(), axis=alt.Axis(labelAngle=0)),
+                        xOffset='구분:N',
+                        y=alt.Y('가격:Q', title='가격 (원)'),
+                        color=alt.Color('구분:N', title='가격 종류', scale=alt.Scale(domain=['전국최저가', '전국평균가', '전국최고가'], range=['#03c75a', '#ffc107', '#ff4b4b'])),
+                        tooltip=['차트 번호', '상품명', '용량', '구분', alt.Tooltip('가격', format=',')] 
+                    ).properties(height=350)
+                    
+                    st.altair_chart(main_chart, use_container_width=True)
+                    
+                    display_summary_df = summary_df.copy()
+                    display_summary_df['전국평균가'] = display_summary_df['전국평균가'].apply(lambda x: f"{int(x):,} 원")
+                    display_summary_df['전국최저가'] = display_summary_df['전국최저가'].apply(lambda x: f"{int(x):,} 원")
+                    display_summary_df['전국최고가'] = display_summary_df['전국최고가'].apply(lambda x: f"{int(x):,} 원")
+                    display_summary_df['판매지점수'] = display_summary_df['판매지점수'].apply(lambda x: f"{int(x):,} 곳")
+                    
+                    st.markdown("##### 📝 데이터 요약표 (차트 번호와 완벽히 매칭됩니다)")
+                    st.dataframe(display_summary_df, use_container_width=True, hide_index=True)
+                    
+                    st.markdown("##### 🏆 특정 브랜드 최저가 매장 찾기")
+                    exact_product = st.selectbox("🎯 정확한 상품을 선택하세요", sorted(item_df['상품명'].unique()))
+                    exact_df = item_df[item_df['상품명'] == exact_product]
+                    
+                    display_item_df = exact_df[['상품명', '판매가격', '표시용_매장명']].sort_values(by='판매가격')
+                    display_item_df = display_item_df.rename(columns={'표시용_매장명': '판매처'})
+                    display_item_df['판매가격'] = display_item_df['판매가격'].apply(lambda x: f"{int(x):,} 원")
+                    
+                    display_item_df['지도보기'] = display_item_df['판매처'].apply(
+                        lambda x: f"https://map.naver.com/v5/search/{x.split(' (')[0]}"
+                    )
+                    
+                    st.dataframe(
+                        display_item_df,
+                        column_config={
+                            "지도보기": st.column_config.LinkColumn("🗺️ 매장 위치", display_text="[ 📍 지도 열기 ]")
+                        },
+                        use_container_width=True, 
+                        hide_index=True
+                    )
+        
         else:
             if selected_store != "전체":
                 st.markdown(f"#### 📦 [{clean_store_name}] 전체 취급 품목")
@@ -283,40 +324,204 @@ try:
                 st.info("👆 상품명을 검색하시거나, 지역 마트를 구체적으로 선택해 보세요.")
 
     with tab2:
-        st.header("🔥 전국 마트 할인 & 장날 소식")
-        st.write("---")
+        st.subheader("📢 [공지] 마트 핫딜 & 전통시장 소식")
+        st.markdown("가장 확실하고 큰 할인 행사 정보만 큐레이션 해드립니다.")
         
-        st.subheader("🎉 [특가] 이번 주말 대형마트 삼겹살 반값 할인 대란!")
-        st.markdown("전국 주요 마트에서 한돈 삼겹살을 최대 50% 할인합니다.")
-        if st.button("👉 자세히 보기 및 삼겹살 가격 비교하기", key="btn_post1"):
-            st.query_params["post"] = "1"
-            st.rerun()
-        
-        st.write("---")
-        
-        st.subheader("🎪 [장날 정보] 인심 넉넉한 용인 중앙시장 5일장 안내")
-        st.markdown("매월 5, 10, 15, 20, 25, 30일 개최되는 싱싱한 전통시장.")
-        if st.button("👉 자세히 보기 및 시장 채소 가격 비교하기", key="btn_post2"):
-            st.query_params["post"] = "2"
-            st.rerun()
+        with st.container(border=True):
+            st.markdown("##### 🎉 [특가] 이번 주말 대형마트 삼겹살 반값 할인 대란!")
+            st.markdown("전국 주요 마트에서 한돈 삼겹살을 최대 50% 할인합니다.")
+            if st.button("👉 자세히 보기 및 삼겹살 가격 비교하기", key="btn_post1"):
+                st.query_params["post"] = "1"
+                st.rerun()
             
-    with tab3:
-        st.header("🚨 줍줍 특공대: 동네 마트 마감세일 실시간 제보")
-        st.markdown("지금 우리 동네 마트에서 어떤 물건을 떨이로 팔고 있나요? 실시간으로 공유하고 알뜰하게 줍줍하세요!")
-        st.write("---")
+            st.markdown("<hr style='margin: 15px 0;'>", unsafe_allow_html=True)
+            
+            st.markdown("##### 🎪 [장날 정보] 인심 넉넉한 용인 중앙시장 5일장 안내")
+            st.markdown("매월 5, 10, 15, 20, 25, 30일 개최되는 싱싱한 전통시장.")
+            if st.button("👉 자세히 보기 및 시장 채소 가격 비교하기", key="btn_post2"):
+                st.query_params["post"] = "2"
+                st.rerun()
+                
+        st.markdown("<br><br>", unsafe_allow_html=True)
+        
+        st.subheader("💬 우리 동네 실시간 소통방")
+        st.markdown("동네 마트 마감세일, 야채가게 떨이 정보 등을 이웃들과 자유롭게 나눠보세요!")
         
         st.success("**[방금 올라온 꿀팁]** 🍎 서울 송파구 롯데슈퍼, 흠집 사과 1봉지 3천원 마감 스티커 붙었어요! (10분 전)")
         st.info("**[방금 올라온 꿀팁]** 🍣 부산 진구 이마트, 연어 초밥 세트 40% 할인 시작했습니다. (25분 전)")
-        st.warning("**[방금 올라온 꿀팁]** 🍞 경기 용인시 동네식자재마트, 당일 구운 식빵 1+1 행사 중 (1시간 전)")
+        st.warning("**[방금 올라온 꿀팁]** 🍞 경기 용인시 식자재마트, 당일 구운 식빵 1+1 행사 중 (1시간 전)")
         
-        st.write("---")
-        st.subheader("✍️ 나도 우리 동네 타임세일 제보하기")
-        with st.form("report_form"):
-            st.text_input("마트 이름과 지역을 적어주세요 (예: 분당 미금역 농협하나로마트)")
-            st.text_area("어떤 상품을 얼마나 싸게 팔고 있나요?")
-            submitted = st.form_submit_button("📢 동네 사람들에게 알리기")
+        st.markdown("<br>", unsafe_allow_html=True)
+        
+        st.markdown("##### ✍️ 나도 실시간 꿀팁 남기기")
+        with st.form("community_post"):
+            col_info1, col_info2 = st.columns(2)
+            with col_info1:
+                user_name = st.text_input("닉네임", placeholder="예: 광명알뜰맘")
+            with col_info2:
+                user_loc = st.text_input("동네 마트 위치", placeholder="예: 미금역 농협하나로마트")
+            
+            user_msg = st.text_area("어떤 세일 정보가 있나요?", placeholder="예: 방금 갔는데 시금치 한 단에 1000원 떨이 중이에요! 수량 5개 남음!")
+            
+            submitted = st.form_submit_button("📢 동네 사람들에게 공유하기", type="primary", use_container_width=True)
             if submitted:
-                st.success("소중한 제보 감사합니다! 관리자 확인 후 실시간 목록에 반영됩니다.")
+                if user_name and user_msg and user_loc:
+                    st.success("소중한 꿀팁 감사합니다! 실시간 목록에 반영되었습니다.")
+                else:
+                    st.warning("닉네임, 마트 위치, 세일 정보를 모두 입력해 주세요.")
+            
+    with tab3:
+        st.header("🎯 장보기 전 필수! '호구 방지' 목표가 판독기")
+        st.markdown("마트 가기 전 미리 확인하세요! 내가 사려는 물건, 도대체 **얼마면 잘 샀다고 소문이 날지** 빅데이터로 기준을 잡아드립니다.")
+        st.write("---")
+        
+        def parse_unit_info(price, cap_str):
+            if pd.isna(cap_str) or cap_str == '단일규격/기타': return None, None
+            match = re.search(r'([0-9.]+)\s*([a-zA-Z가-힣]+)', str(cap_str))
+            if not match: return None, None
+            num = float(match.group(1))
+            unit = match.group(2).lower()
+            if unit == 'kg': num *= 1000; unit = 'g'
+            elif unit == 'l': num *= 1000; unit = 'ml'
+            elif unit in ['개입', '매', '캔', '팩', '봉', '인', '롤']: unit = '개'
+            
+            if num == 0: return None, None
+            return price / num, unit
+
+        categories_list = sorted(food_only_df['카테고리'].unique())
+        
+        col_a, col_b = st.columns(2)
+        with col_a:
+            calc_cat = st.selectbox("🛒 1. 구매할 상품 종류", categories_list, index=None, placeholder="👇 카테고리를 먼저 선택하세요", key='calc_cat')
+        
+        with col_b:
+            if calc_cat:
+                calc_items = sorted(food_only_df[food_only_df['카테고리'] == calc_cat]['상품명'].unique())
+                calc_item = st.selectbox("🥩 2. 정확한 상품명 선택", calc_items, index=None, placeholder="👇 상품명을 선택하세요", key='calc_item')
+            else:
+                st.selectbox("🥩 2. 정확한 상품명 선택", [], index=None, placeholder="👈 카테고리를 선택하면 활성화됩니다", disabled=True, key='calc_item_disabled')
+                calc_item = None
+        
+        st.markdown("<br>", unsafe_allow_html=True)
+        
+        if st.button("🔍 목표가(적정가) 확인하기", type="primary", use_container_width=True):
+            if not calc_item:
+                st.warning("👆 목표가를 분석할 상품을 먼저 선택해 주세요!")
+            else:
+                calc_df = food_only_df[food_only_df['상품명'] == calc_item]
+                avg_p = calc_df['판매가격'].mean()
+                min_p = calc_df['판매가격'].min()
+                max_p = calc_df['판매가격'].max()
+                
+                st.markdown("### 📊 빅데이터 목표가 분석 결과")
+                st.markdown(f"현재 **[{calc_item}]**의 전국 마트 가격 분포입니다.")
+                
+                col_min, col_avg, col_max = st.columns(3)
+                with col_min:
+                    st.metric("📉 전국 최저가", f"{int(min_p):,}원")
+                with col_avg:
+                    st.metric("➖ 전국 평균가", f"{int(avg_p):,}원")
+                with col_max:
+                    st.metric("📈 전국 최고가", f"{int(max_p):,}원")
+                    
+                st.markdown("<hr style='margin: 10px 0 20px 0;'>", unsafe_allow_html=True)
+                
+                if min_p == max_p:
+                    st.success(f"💡 **이 상품은 전국 마트 가격이 {int(min_p):,}원으로 모두 동일합니다!** (정찰제 또는 행사 동일 적용)\n\n어디서 사든 손해 보지 않으니 편하게 구매하세요.")
+                else:
+                    good_price = int((min_p + avg_p) / 2)
+                    bad_price = int((avg_p + max_p) / 2)
+                    
+                    col_x, col_y, col_z = st.columns(3)
+                    with col_x:
+                        st.markdown(f"""
+                        <div style="padding: 15px; border-radius: 8px; background-color: #d4edda; border: 1px solid #c3e6cb; text-align: center;">
+                            <h3 style="margin: 0; color: #155724; font-size: 18px;">🔥 무조건 담으세요!</h3>
+                            <p style="margin: 10px 0 0 0; font-size: 22px; font-weight: bold; color: #111;">{good_price:,}원 이하</p>
+                        </div>
+                        """, unsafe_allow_html=True)
+                    with col_y:
+                        st.markdown(f"""
+                        <div style="padding: 15px; border-radius: 8px; background-color: #e2e3e5; border: 1px solid #d6d8db; text-align: center;">
+                            <h3 style="margin: 0; color: #383d41; font-size: 18px;">👍 훌륭한 적정가</h3>
+                            <p style="margin: 10px 0 0 0; font-size: 20px; font-weight: bold; color: #333;">{good_price:,}원 ~ {bad_price:,}원</p>
+                        </div>
+                        """, unsafe_allow_html=True)
+                    with col_z:
+                        st.markdown(f"""
+                        <div style="padding: 15px; border-radius: 8px; background-color: #f8d7da; border: 1px solid #f5c6cb; text-align: center;">
+                            <h3 style="margin: 0; color: #721c24; font-size: 18px;">🚨 카트에서 빼세요!</h3>
+                            <p style="margin: 10px 0 0 0; font-size: 22px; font-weight: bold; color: #111;">{bad_price:,}원 이상</p>
+                        </div>
+                        """, unsafe_allow_html=True)
+        
+                    st.markdown("<br>", unsafe_allow_html=True)
+                    st.info("💡 **쇼핑 팁:** 마트에 가셨을 때 해당 상품의 가격표가 **초록색 상자 가격**에 가깝다면 주저 없이 구매하셔도 좋습니다!")
+                
+                st.markdown("<br>", unsafe_allow_html=True)
+                st.markdown("#### 💡 혹시 평균가가 너무 비싸게 느껴지신다면?")
+                
+                keyword_groups = [
+                    ['계란', '달걀'], ['우유'], ['치즈'], ['요거트'], ['버터'],
+                    ['돼지고기', '삼겹살', '목살', '앞다리', '뒷다리'], ['소고기', '한우'], ['닭'], ['고등어'], ['오징어'],
+                    ['감자'], ['고구마'], ['양파'], ['마늘'], ['배추'], ['쌀'],
+                    ['라면'], ['만두'], ['스파게티'], ['햇반']
+                ]
+                
+                matched_group = None
+                for group in keyword_groups:
+                    if any(kw in calc_item for kw in group):
+                        matched_group = group
+                        break
+                
+                base_alt_df = food_only_df[food_only_df['카테고리'] == calc_cat]
+                if matched_group:
+                    pattern = '|'.join(matched_group)
+                    base_alt_df = base_alt_df[base_alt_df['상품명'].str.contains(pattern, na=False)]
+                    
+                alt_candidates = base_alt_df.groupby(['상품명', '용량'])['판매가격'].mean().reset_index()
+                alt_candidates = alt_candidates[alt_candidates['상품명'] != calc_item]
+                
+                calc_cap = calc_df['용량'].iloc[0] if not calc_df.empty else '단일규격/기타'
+                calc_unit_price, calc_base_unit = parse_unit_info(avg_p, calc_cap)
+                
+                recom_item = None
+                is_bulk_discount = False
+                
+                if calc_unit_price is not None and not alt_candidates.empty:
+                    def apply_unit_price(row):
+                        up, u = parse_unit_info(row['판매가격'], row['용량'])
+                        return pd.Series([up, u])
+                    
+                    alt_candidates[['단가', '기준단위']] = alt_candidates.apply(apply_unit_price, axis=1)
+                    valid_alts = alt_candidates[(alt_candidates['기준단위'] == calc_base_unit) & (alt_candidates['단가'] < calc_unit_price)]
+                    
+                    if not valid_alts.empty:
+                        recom_item = valid_alts.sort_values('단가').head(3).sample(1).iloc[0]
+                        if recom_item['판매가격'] > avg_p:
+                            is_bulk_discount = True
+                else:
+                    valid_alts = alt_candidates[alt_candidates['판매가격'] < avg_p]
+                    if not valid_alts.empty:
+                        recom_item = valid_alts.sort_values('판매가격').head(3).sample(1).iloc[0]
+    
+                if recom_item is not None:
+                    if is_bulk_discount:
+                        st.markdown(f"""
+                        <div style="padding: 15px; border-radius: 8px; background-color: #fff9e6; border-left: 5px solid #ffc107;">
+                            결제 금액은 조금 더 크지만, <b>용량 대비 가성비({recom_item['기준단위']}당 단가)</b>가 압도적으로 좋은 대용량 상품을 추천해 드립니다!<br><br>
+                            오늘은 <b>{calc_item}</b> 대신, 가성비가 훌륭한 <b>[{recom_item['상품명']}] (평균 {int(recom_item['판매가격']):,}원)</b>(으)로 쟁여두는 건 어떨까요?
+                        </div>
+                        """, unsafe_allow_html=True)
+                    else:
+                        st.markdown(f"""
+                        <div style="padding: 15px; border-radius: 8px; background-color: #f8f9fa; border-left: 5px solid #6c757d;">
+                            오늘은 비싼 <b>{calc_item}</b> 대신,<br> 
+                            평균 <b>{int(recom_item['판매가격']):,}원</b>으로 더 저렴한 <b>[{recom_item['상품명']}]</b>(으)로 장바구니를 채워보는 건 어떨까요?
+                        </div>
+                        """, unsafe_allow_html=True)
+                else:
+                    st.success("💡 **현재 고르신 상품이 동종 카테고리 내에서 가장 가성비가 훌륭한 식재료입니다!** 비싸게 느낄 필요 없이 안심하고 구매하세요.")
 
 except Exception as e:
     st.error("데이터 파일을 찾을 수 없습니다.")
