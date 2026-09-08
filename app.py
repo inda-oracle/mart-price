@@ -71,10 +71,11 @@ st.title("🛒 전국 마트 식자재 실시간 가격 검색기")
 st.markdown("우리 동네 마트 가격과 전국 최저가를 한눈에 비교해 보세요!")
 st.markdown("---")
 
-# ⚡ [핵심 최적화 구간] 데이터를 부르고 무거운 연산을 최초 1회만 수행하여 캐시에 저장
+# ⚡ [극한 최적화 구간] 연산 단순화 및 타입 지정
 @st.cache_data
 def load_data():
     try:
+        # csv 읽을 때 필요한 열만 읽거나 타입을 지정하면 더 빠르지만, 범용성을 위해 일단 유지
         df = pd.read_csv("adress.zip", encoding='cp949') 
     except:
         df = pd.read_csv("adress.zip", encoding='utf-8')
@@ -106,8 +107,10 @@ def load_data():
     
     if '주소' in df.columns:
         df['주소'] = df['주소'].fillna("주소 미상")
-        df['시도'] = df['주소'].apply(lambda x: str(x).split()[0] if len(str(x).split()) > 0 else '미상')
-        df['시군구'] = df['주소'].apply(lambda x: str(x).split()[1] if len(str(x).split()) > 1 else '미상')
+        # split을 여러 번 호출하는 대신 정규식이나 한번의 split으로 개선
+        addr_split = df['주소'].str.split(n=2, expand=True)
+        df['시도'] = addr_split[0].fillna('미상')
+        df['시군구'] = addr_split[1].fillna('미상')
         df['표시용_매장명'] = df['판매업소'] + " (" + df['주소'] + ")"
     else:
         df['시도'] = '전체 지역'
@@ -117,7 +120,6 @@ def load_data():
     df = df.drop_duplicates(subset=['판매업소', '상품명', '판매가격'])
     food_only_df = df[df['카테고리'] != '🛒 기타 식자재']
     
-    # --- 가장 렉을 유발했던 물가 기상도 데이터 최초 1회 사전 계산 ---
     date_col = next((c for c in df.columns if c in ['날짜', '조사일', '조사일자', 'date', 'Date']), None)
     weather_info = {}
     
@@ -159,13 +161,11 @@ def load_data():
     return df, food_only_df, weather_info
 
 try:
-    # 최초 1회만 계산되고 이후에는 캐시에서 0.01초만에 가져옵니다.
     df, food_only_df, weather_info = load_data()
     
     tab1, tab2, tab3 = st.tabs(["🔍 1. 실시간 가격 검색", "💬 2. 핫딜 & 동네 소통방", "🎯 3. 장보기 전 목표가 판독기"])
     
     with tab1:
-        # 캐시된 연산 결과를 렌더링만 합니다 (렉 제로)
         with st.container(border=True):
             st.markdown(f"""
             <div style="padding: 20px; border-radius: 12px; background: linear-gradient(135deg, #fffbc8 0%, #ffeedb 100%); border: 1px solid #ffeeba; margin-bottom: 15px; box-shadow: 0 4px 6px rgba(0,0,0,0.02);">
@@ -196,15 +196,27 @@ try:
         
         st.subheader("📍 1. 동네 마트 선택")
         col1, col2, col3 = st.columns(3)
-        with col1: selected_sido = st.selectbox("📌 시/도 선택", ["전체"] + sorted(df['시도'].unique().tolist()))
+        
+        # 💡 list() 변환 과정을 최소화하여 렌더링 속도 향상
+        sido_options = ["전체"] + sorted(df['시도'].unique())
+        with col1: 
+            selected_sido = st.selectbox("📌 시/도 선택", sido_options)
+        
         with col2:
-            sigungu_list = ["전체"] if selected_sido == "전체" else ["전체"] + sorted(df[df['시도'] == selected_sido]['시군구'].unique().tolist())
-            selected_sigungu = st.selectbox("📌 시/군/구 선택", sigungu_list)
+            if selected_sido == "전체":
+                sigungu_options = ["전체"]
+            else:
+                sigungu_options = ["전체"] + sorted(df.loc[df['시도'] == selected_sido, '시군구'].unique())
+            selected_sigungu = st.selectbox("📌 시/군/구 선택", sigungu_options)
+            
         with col3:
-            if selected_sido == "전체": store_list = ["전체"]
-            elif selected_sigungu == "전체": store_list = ["전체"] + sorted(df[df['시도'] == selected_sido]['표시용_매장명'].unique().tolist())
-            else: store_list = ["전체"] + sorted(df[(df['시도'] == selected_sido) & (df['시군구'] == selected_sigungu)]['표시용_매장명'].unique().tolist())
-            selected_store = st.selectbox("🛒 마트 선택", store_list)
+            if selected_sido == "전체": 
+                store_options = ["전체"]
+            elif selected_sigungu == "전체": 
+                store_options = ["전체"] + sorted(df.loc[df['시도'] == selected_sido, '표시용_매장명'].unique())
+            else: 
+                store_options = ["전체"] + sorted(df.loc[(df['시도'] == selected_sido) & (df['시군구'] == selected_sigungu), '표시용_매장명'].unique())
+            selected_store = st.selectbox("🛒 마트 선택", store_options)
     
         if selected_store == "전체":
             clean_store_name, store_address = "전체 매장", "전국 모든 매장" if selected_sido == "전체" else f"{selected_sido} 내 모든 매장"
@@ -236,10 +248,11 @@ try:
         global_search_keyword = st.text_input("찾으시는 상품을 입력하세요 (예: 우유, 삼겹살)", placeholder="검색하시면 전국 마트 가격과 동시 분석됩니다.")
         
         if global_search_keyword:
+            # boolean indexing 최적화
             base_mask = df['상품명'].str.contains(global_search_keyword, na=False)
             base_item_df = df[base_mask]
             
-            if len(base_item_df) == 0: 
+            if base_item_df.empty: 
                 st.warning("전국 매장에 검색하신 조건의 상품이 없습니다.")
             else:
                 word_counter = Counter()
@@ -259,31 +272,36 @@ try:
                             if cols[i % 6].checkbox(w, key=f"exc_{w}"):
                                 exclude_keywords.append(w)
                 
-                store_df = df.copy()
-                if selected_sido != "전체": store_df = store_df[store_df['시도'] == selected_sido]
-                if selected_sigungu != "전체": store_df = store_df[store_df['시군구'] == selected_sigungu]
-                if selected_store != "전체": store_df = store_df[store_df['표시용_매장명'] == selected_store]
-                    
-                store_mask = store_df['상품명'].str.contains(global_search_keyword, na=False)
+                # df.copy() 대신 뷰(View)를 활용하거나 조건 마스크를 먼저 만들어 메모리 복사 방지
+                store_mask = base_mask.copy()
                 
+                if selected_sido != "전체": 
+                    store_mask &= (df['시도'] == selected_sido)
+                if selected_sigungu != "전체": 
+                    store_mask &= (df['시군구'] == selected_sigungu)
+                if selected_store != "전체": 
+                    store_mask &= (df['표시용_매장명'] == selected_store)
+                    
                 for ex in exclude_keywords:
-                    store_mask &= ~store_df['상품명'].str.contains(ex, na=False)
-                    base_mask &= ~df['상품명'].str.contains(ex, na=False)
+                    ex_mask = df['상품명'].str.contains(ex, na=False)
+                    store_mask &= ~ex_mask
+                    base_mask &= ~ex_mask
                         
-                store_search_df = store_df[store_mask]
+                store_search_df = df[store_mask]
                 
                 st.markdown(f"#### 🛒 [{clean_store_name}] '{global_search_keyword}' 판매 가격")
-                if len(store_search_df) == 0: 
+                if store_search_df.empty: 
                     st.warning("해당 매장에는 검색/제외 조건에 맞는 상품이 없습니다.")
                 else:
                     display_cols = ['판매업소', '카테고리', '상품명', '판매가격'] if selected_store == "전체" else ['카테고리', '상품명', '판매가격']
-                    display_df = store_search_df[display_cols].sort_values(by=['판매가격', '상품명'])
+                    # .loc를 사용하여 안전하게 컬럼 선택 후 복사
+                    display_df = store_search_df.loc[:, display_cols].sort_values(by=['판매가격', '상품명'])
                     display_df['판매가격'] = display_df['판매가격'].apply(lambda x: f"{int(x):,} 원")
                     st.dataframe(display_df, use_container_width=True, hide_index=True)
 
                 item_df = df[base_mask]
                 
-                if len(item_df) > 0:
+                if not item_df.empty:
                     st.markdown(f"#### 📊 '{global_search_keyword}' 전국 최저/최고가 분석")
                     
                     summary_df = item_df.groupby(['상품명', '용량']).agg(
@@ -294,7 +312,6 @@ try:
                     ).reset_index()
                     
                     summary_df = summary_df.sort_values(by=['상품명', '용량']).reset_index(drop=True)
-                    
                     summary_df.insert(0, '차트 번호', [f"{i}번" for i in range(1, len(summary_df) + 1)])
                     
                     st.markdown("##### 📈 상품별 전국 가격 비교 차트")
@@ -344,9 +361,8 @@ try:
         else:
             if selected_store != "전체":
                 st.markdown(f"#### 📦 [{clean_store_name}] 전체 취급 품목")
-                store_df = df[df['표시용_매장명'] == selected_store]
-                
-                display_df = store_df[['카테고리', '상품명', '판매가격']].sort_values(by=['카테고리', '상품명'])
+                store_df = df.loc[df['표시용_매장명'] == selected_store, ['카테고리', '상품명', '판매가격']]
+                display_df = store_df.sort_values(by=['카테고리', '상품명'])
                 display_df['판매가격'] = display_df['판매가격'].apply(lambda x: f"{int(x):,} 원")
                 
                 st.dataframe(display_df, use_container_width=True, hide_index=True)
@@ -354,7 +370,7 @@ try:
                 st.info("👆 상품명을 검색하시거나, 지역 마트를 구체적으로 선택해 보세요.")
 
     # ==============================================================
-    # 💬 2. 핫딜 & 동네 소통방 (삭제/공지 기능 추가!)
+    # 💬 2. 핫딜 & 동네 소통방 
     # ==============================================================
     with tab2:
         st.subheader("📢 [이벤트] 진행 중인 기획전")
@@ -372,7 +388,6 @@ try:
         st.markdown("<br><br>", unsafe_allow_html=True)
         st.subheader("💬 우리 동네 실시간 소통방 (공지 및 꿀팁)")
         
-        # --- [관리자 전용] 공지사항 작성 폼 ---
         if is_admin:
             with st.expander("🚨 [관리자 전용] 새 공지사항 작성하기", expanded=True):
                 with st.form("admin_notice_form"):
@@ -388,7 +403,6 @@ try:
                         st.success("공지가 등록되었습니다.")
                         st.rerun()
 
-        # --- DB에서 게시글 불러와서 렌더링 ---
         try:
             response = supabase.table("community_posts").select("*").order("created_at", desc=True).limit(50).execute()
             posts = response.data
@@ -502,7 +516,7 @@ try:
         
         with col_b:
             if calc_cat:
-                calc_items = sorted(food_only_df[food_only_df['카테고리'] == calc_cat]['상품명'].unique())
+                calc_items = sorted(food_only_df.loc[food_only_df['카테고리'] == calc_cat, '상품명'].unique())
                 calc_item = st.selectbox("🥩 2. 정확한 상품명 선택", calc_items, index=None, placeholder="👇 상품명을 선택하세요", key='calc_item')
             else:
                 st.selectbox("🥩 2. 정확한 상품명 선택", [], index=None, placeholder="👈 카테고리를 선택하면 활성화됩니다", disabled=True, key='calc_item_disabled')
