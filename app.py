@@ -3,25 +3,22 @@ import pandas as pd
 import random
 import altair as alt
 import re 
+import time
 from collections import Counter
 
 # 🚀 Supabase 연결용 라이브러리
 from supabase import create_client, Client
 
-# 1. 사이트 기본 설정
+# 1. 사이트 기본 설정 (사이드바 메뉴 완전히 제거됨)
 st.set_page_config(page_title="마트 식자재 가격 검색", layout="wide")
 
 # ==============================================================
-# 👑 사이드바: 숨겨진 관리자 로그인 모드
+# 👑 [히든 기능] 주소창 쿼리로 관리자 모드 활성화 (?admin=0000)
 # ==============================================================
-with st.sidebar:
-    st.markdown("### 🛠️ 관리자 전용 메뉴")
-    admin_input = st.text_input("관리자 암호를 입력하세요", type="password")
-    is_admin = (admin_input == "0000") 
-    
-    if is_admin:
-        st.success("✅ 관리자 권한 활성화됨")
-        st.info("이제 유저들의 모든 글을 강제 삭제할 수 있으며, 공지사항 및 기획전을 등록할 수 있습니다.")
+is_admin = False
+if st.query_params.get("admin") == "0000":
+    is_admin = True
+    st.toast("🚨 관리자 권한이 활성화되었습니다.", icon="✅")
 
 # ==============================================================
 # 🗄️ Supabase 연결 및 캐싱
@@ -43,8 +40,94 @@ def fetch_community_posts():
     except:
         return []
 
+# 💡 글의 카테고리를 정확히 판별하는 함수 (비밀번호 칸 활용)
+def get_post_category(post):
+    pw = str(post.get('password', ''))
+    loc = str(post.get('location', ''))
+    if pw == 'admin_공지사항' or (pw == 'admin' and loc == '공지사항'): return '공지사항'
+    if pw == 'admin_기획전' or (pw == 'admin' and loc == '기획전'): return '기획전'
+    return '일반'
+
 # ==============================================================
-# 🚀 단독 글 페이지 (외부 유입용 고유 URL 처리)
+# 🚀 팝업(모달) 글쓰기 창 
+# ==============================================================
+@st.dialog("🚨 관리자 전용 글 작성")
+def admin_write_dialog():
+    with st.form("admin_notice_form", clear_on_submit=True):
+        post_type = st.radio("작성할 글 종류 선택", ["공지사항", "기획전"], horizontal=True)
+        notice_title = st.text_input("글 제목", placeholder="예: [특가] 주말 삼겹살 반값!")
+        notice_loc = st.text_input("행사 마트 위치 (선택사항)", placeholder="예: 전국 이마트, 용인중앙시장 등")
+        notice_msg = st.text_area("상세 내용", height=150)
+        uploaded_file = st.file_uploader("전단지/배너 사진 업로드 (선택사항)", type=['png', 'jpg', 'jpeg'])
+        
+        if st.form_submit_button("등록하기", type="primary", use_container_width=True):
+            if not notice_title or not notice_msg:
+                st.warning("제목과 내용은 필수입니다.")
+                return
+                
+            image_url = None
+            if uploaded_file:
+                try:
+                    file_name = f"{random.randint(100000, 999999)}_{uploaded_file.name}"
+                    supabase.storage.from_("post_images").upload(file=uploaded_file.getvalue(), path=file_name, file_options={"content-type": uploaded_file.type})
+                    image_url = supabase.storage.from_("post_images").get_public_url(file_name)
+                except Exception:
+                    pass
+            
+            supabase.table("community_posts").insert({
+                "nickname": "운영자", 
+                "location": notice_loc, 
+                "title": notice_title,
+                "content": notice_msg,
+                "password": f"admin_{post_type}", 
+                "image_url": image_url
+            }).execute()
+            fetch_community_posts.clear() 
+            st.rerun()
+
+@st.dialog("✍️ 동네 꿀팁 남기기")
+def user_write_dialog():
+    with st.form("community_post", clear_on_submit=True):
+        col_info1, col_info2, col_info3 = st.columns(3)
+        with col_info1:
+            user_name = st.text_input("닉네임", placeholder="예: 광명알뜰맘")
+        with col_info2:
+            user_loc = st.text_input("마트 위치", placeholder="예: 미금역 농협")
+        with col_info3:
+            user_pw = st.text_input("비밀번호 (수정/삭제용)", type="password", placeholder="숫자 4자리")
+        
+        user_title = st.text_input("글 제목", placeholder="예: 오늘 이마트 대박 세일 정보 공유해요!")
+        user_msg = st.text_area("상세 내용", placeholder="자세한 세일 정보를 공유해주세요.", height=150)
+        uploaded_file = st.file_uploader("전단지/영수증 사진 첨부 (선택사항)", type=['png', 'jpg', 'jpeg'])
+        
+        if st.form_submit_button("📢 동네 사람들에게 공유하기", type="primary", use_container_width=True):
+            if user_name and user_title and user_msg and user_loc and user_pw:
+                image_url = None
+                if uploaded_file:
+                    try:
+                        file_name = f"{random.randint(100000, 999999)}_{uploaded_file.name}"
+                        supabase.storage.from_("post_images").upload(file=uploaded_file.getvalue(), path=file_name, file_options={"content-type": uploaded_file.type})
+                        image_url = supabase.storage.from_("post_images").get_public_url(file_name)
+                    except Exception:
+                        pass
+                try:
+                    supabase.table("community_posts").insert({
+                        "nickname": user_name,
+                        "location": user_loc,
+                        "title": user_title,
+                        "content": user_msg,
+                        "password": user_pw,
+                        "image_url": image_url
+                    }).execute()
+                    fetch_community_posts.clear() 
+                    st.rerun() 
+                except Exception:
+                    st.error("🚨 저장 실패! Supabase 세팅을 확인해주세요.")
+            else:
+                st.warning("닉네임, 마트 위치, 비밀번호, 제목, 정보를 모두 입력해 주세요.")
+
+# ==============================================================
+# 🚀 단독 글 페이지 (외부 유입 및 수정 완료 후 복귀 로직 추가)
 # ==============================================================
 url_post_id = st.query_params.get("post_id")
 
@@ -59,30 +142,116 @@ if url_post_id:
         post_title = single_post.get('title') or single_post.get('nickname')
         st.markdown(f"## {post_title}")
         
-        loc = single_post.get('location', '동네')
+        cat = get_post_category(single_post)
+        loc = single_post.get('location', '')
         writer = single_post.get('nickname', '익명')
         
-        if loc in ['공지사항', '기획전']:
-            st.caption(f"📌 {loc} | 👤 관리자 작성")
+        if cat == '공지사항':
+            st.caption(f"📌 공지사항 | 👤 {writer}")
+        elif cat == '기획전':
+            if loc and loc.strip() and loc not in ['공지사항', '기획전']:
+                st.caption(f"🎉 기획전 | 📍 {loc} | 👤 {writer}")
+            else:
+                st.caption(f"🎉 기획전 | 👤 {writer}")
         else:
             st.caption(f"📍 위치: {loc} | 👤 작성자: {writer}")
             
         st.divider()
-        st.markdown(f"<div style='font-size: 18px; color: #222; line-height: 1.8; min-height: 200px;'>{single_post.get('content', '')}</div>", unsafe_allow_html=True)
-        st.divider()
         
-        # 외부 유입 유저를 메인 서비스로 유도하는 버튼
-        if st.button("⬅️ 목록으로 돌아가기 / 🛒 마트 가격 검색기 메인", type="primary", use_container_width=True):
-            st.query_params.clear() 
-            st.rerun()
-            
-        if is_admin:
+        if single_post.get('image_url'):
+            st.image(single_post['image_url'], use_container_width=True)
             st.markdown("<br>", unsafe_allow_html=True)
-            if st.button("🚨 관리자: 이 원본 글 영구 삭제"):
-                supabase.table("community_posts").delete().eq("id", url_post_id).execute()
-                fetch_community_posts.clear()
-                st.query_params.clear()
-                st.rerun()
+            
+        st.markdown(f"<div style='font-size: 18px; color: #222; line-height: 1.8; min-height: 100px;'>{single_post.get('content', '')}</div>", unsafe_allow_html=True)
+        st.markdown("<br>", unsafe_allow_html=True)
+        
+        if loc and loc.strip() and loc not in ['공지사항', '기획전', '동네']:
+            map_url = f"https://map.naver.com/v5/search/{loc}"
+            st.link_button(f"🗺️ [{loc}] 네이버 지도에서 정확한 위치 확인하기", map_url, use_container_width=True)
+            
+        st.divider()
+
+        with st.expander("⚙️ 글 수정 및 삭제"):
+            is_authorized = False
+            
+            if is_admin:
+                st.success("✅ 관리자 권한으로 즉시 수정 및 삭제가 가능합니다.")
+                is_authorized = True
+            else:
+                edit_pw = st.text_input("글 작성 시 설정한 비밀번호를 입력하세요", type="password", key=f"pw_edit_{url_post_id}")
+                if edit_pw:
+                    if edit_pw == str(single_post.get('password')):
+                        is_authorized = True
+                    else:
+                        st.error("비밀번호가 일치하지 않습니다.")
+                        
+            if is_authorized:
+                tab_edit, tab_del = st.tabs(["✏️ 글 수정", "🗑️ 글 삭제"])
+                
+                with tab_edit:
+                    with st.form(f"edit_form_{url_post_id}", clear_on_submit=True):
+                        if is_admin and cat in ['공지사항', '기획전']:
+                            e_cat = st.radio("글 종류 변경", ["공지사항", "기획전"], index=0 if cat=="공지사항" else 1, horizontal=True)
+                            e_name = "운영자"
+                            clean_loc = loc if loc not in ['공지사항', '기획전'] else ''
+                            e_loc = st.text_input("행사 마트 위치 (선택사항)", value=clean_loc)
+                            e_pw = f"admin_{e_cat}"
+                        else:
+                            col_e1, col_e2 = st.columns(2)
+                            with col_e1:
+                                e_name = st.text_input("닉네임", value=writer)
+                            with col_e2:
+                                e_loc = st.text_input("마트 위치", value=loc)
+                            e_pw = single_post.get('password')
+                        
+                        e_title = st.text_input("글 제목", value=post_title)
+                        e_content = st.text_area("상세 내용", value=single_post.get('content', ''), height=200)
+                        e_file = st.file_uploader("새 사진 업로드 (선택 시 기존 사진을 덮어씁니다)", type=['png', 'jpg', 'jpeg'])
+                        
+                        if st.form_submit_button("수정 내용 저장", type="primary", use_container_width=True):
+                            new_image_url = single_post.get('image_url')
+                            if e_file:
+                                try:
+                                    file_name = f"{random.randint(100000, 999999)}_{e_file.name}"
+                                    supabase.storage.from_("post_images").upload(file=e_file.getvalue(), path=file_name, file_options={"content-type": e_file.type})
+                                    new_image_url = supabase.storage.from_("post_images").get_public_url(file_name)
+                                except Exception:
+                                    pass
+                            try:
+                                supabase.table("community_posts").update({
+                                    "nickname": e_name,
+                                    "location": e_loc,
+                                    "title": e_title,
+                                    "content": e_content,
+                                    "image_url": new_image_url,
+                                    "password": e_pw 
+                                }).eq("id", url_post_id).execute()
+                                fetch_community_posts.clear()
+                                
+                                st.success("✅ 글이 성공적으로 수정되었습니다! 목록으로 돌아갑니다.")
+                                time.sleep(1)
+                                st.query_params["go_tab"] = "2"
+                                st.query_params.pop("post_id", None)
+                                st.rerun()
+                            except Exception as e:
+                                st.error("🚨 수정 중 오류가 발생했습니다.")
+                                
+                with tab_del:
+                    st.warning("정말 이 글을 삭제하시겠습니까? 삭제 후에는 복구할 수 없습니다.")
+                    if st.button("🚨 영구 삭제하기", type="primary"):
+                        supabase.table("community_posts").delete().eq("id", url_post_id).execute()
+                        fetch_community_posts.clear()
+                        
+                        st.query_params["go_tab"] = "2"
+                        st.query_params.pop("post_id", None)
+                        st.rerun()
+
+        st.markdown("<br>", unsafe_allow_html=True)
+        
+        if st.button("⬅️ 목록으로 돌아가기", type="primary", use_container_width=True):
+            st.query_params["go_tab"] = "2"
+            st.query_params.pop("post_id", None)
+            st.rerun()
                 
         st.stop() 
     else:
@@ -92,14 +261,9 @@ if url_post_id:
             st.rerun()
         st.stop()
 
-
 # ==============================================================
-# 📌 메인 검색 서비스
+# 📌 메인 데이터 로드 영역
 # ==============================================================
-st.title("🛒 전국 마트 식자재 실시간 가격 검색기")
-st.markdown("우리 동네 마트 가격과 전국 최저가를 한눈에 비교해 보세요!")
-st.markdown("---")
-
 @st.cache_data
 def load_data():
     try:
@@ -116,7 +280,7 @@ def load_data():
         '제습제', '부탄가스', '위생백', '위생장갑', '에너자이저', 'CAT', 'DOG', '페브리즈', 
         '테크', '액츠', '퍼실', '피죤', '크린백', '자연퐁', '프릴', '트리오', '무균무때', 
         '홈스타', '리스테린', '도브', '드봉', '바디피트', '좋은느낌', '화이트', '닥터지', 
-        '디펜드', '라이프리', '키퍼스', '아이!깨끗해', '하기ส', '2080', '페리오', '오랄비', 
+        '디펜드', '라이프리', '키퍼스', '아이!깨끗해', '하기스', '2080', '페리오', '오랄비', 
         '모나리자', '잘풀리는집', '코디', '크리넥스', '타월', '에프킬라', '다우니', '샤프란', '리큐'
     ]
     df = df[~df['상품명'].str.contains('|'.join(non_food_keywords), na=False)]
@@ -189,9 +353,29 @@ def load_data():
 try:
     df, food_only_df, weather_info = load_data()
     
-    tab1, tab2, tab3 = st.tabs(["🔍 1. 실시간 가격 검색", "💬 2. 핫딜 & 동네 소통방", "🎯 3. 장보기 전 목표가 판독기"])
+    st.title("🛒 전국 마트 식자재 실시간 가격 검색기")
+    st.markdown("우리 동네 마트 가격과 전국 최저가를 한눈에 비교해 보세요!")
+    st.markdown("---")
+
+    if "current_tab" not in st.session_state:
+        st.session_state["current_tab"] = "🔍 1. 실시간 가격 검색"
+        
+    if st.query_params.get("go_tab") == "2":
+        st.session_state["current_tab"] = "💬 2. 핫딜 & 동네 소통방"
+        st.query_params.clear()
+        
+    menu_options = ["🔍 1. 실시간 가격 검색", "💬 2. 핫딜 & 동네 소통방", "🎯 3. 장보기 전 목표가 판독기"]
     
-    with tab1:
+    selected_tab = st.radio("메뉴 선택", menu_options, horizontal=True, label_visibility="collapsed", index=menu_options.index(st.session_state["current_tab"]))
+    
+    if selected_tab != st.session_state["current_tab"]:
+        st.session_state["current_tab"] = selected_tab
+        st.rerun()
+
+    # ==============================================================
+    # 탭 1. 실시간 가격 검색
+    # ==============================================================
+    if st.session_state["current_tab"] == "🔍 1. 실시간 가격 검색":
         with st.container(border=True):
             st.markdown(f"""
             <div style="padding: 20px; border-radius: 12px; background: linear-gradient(135deg, #fffbc8 0%, #ffeedb 100%); border: 1px solid #ffeeba; margin-bottom: 15px; box-shadow: 0 4px 6px rgba(0,0,0,0.02);">
@@ -396,41 +580,32 @@ try:
                 st.info("👆 상품명을 검색하시거나, 지역 마트를 구체적으로 선택해 보세요.")
 
     # ==============================================================
-    # 💬 2. 핫딜 & 동네 소통방 
+    # 💬 탭 2. 핫딜 & 동네 소통방 
     # ==============================================================
-    with tab2:
+    elif st.session_state["current_tab"] == "💬 2. 핫딜 & 동네 소통방":
         try:
             posts = fetch_community_posts()
             
-            notice_posts = [p for p in posts if p.get('location') == '공지사항']
-            event_posts = [p for p in posts if p.get('location') == '기획전']
-            user_posts = [p for p in posts if p.get('location') not in ['공지사항', '기획전']]
+            notice_posts = [p for p in posts if get_post_category(p) == '공지사항']
+            event_posts = [p for p in posts if get_post_category(p) == '기획전']
+            user_posts = [p for p in posts if get_post_category(p) == '일반']
         except Exception as e:
             st.error(f"서버에서 게시글을 불러오는 중 문제가 발생했습니다. ({e})")
             notice_posts, event_posts, user_posts = [], [], []
 
         if is_admin:
-            with st.expander("🚨 [관리자 전용] 글 작성하기 (공지사항 / 기획전)", expanded=True):
-                with st.form("admin_notice_form"):
-                    post_type = st.radio("작성할 글 종류 선택", ["공지사항", "기획전"], horizontal=True)
-                    notice_title = st.text_input("글 제목", value="🚨 운영자 알림" if post_type == "공지사항" else "🎉 신규 기획전")
-                    notice_msg = st.text_area("상세 내용")
-                    
-                    if st.form_submit_button("등록하기", type="primary"):
-                        supabase.table("community_posts").insert({
-                            "nickname": notice_title,
-                            "location": post_type,
-                            "title": notice_title,
-                            "content": notice_msg,
-                            "password": "admin"
-                        }).execute()
-                        fetch_community_posts.clear() 
-                        st.success(f"{post_type}이(가) 성공적으로 등록되었습니다.")
-                        st.rerun()
+            # 💡 관리자 모드일 때만 보이는 버튼과 종료 버튼 추가
+            col_ad1, col_ad2 = st.columns([4, 1])
+            with col_ad1:
+                if st.button("🚨 관리자 전용 글 작성하기", type="primary", use_container_width=True):
+                    admin_write_dialog()
+            with col_ad2:
+                if st.button("닫기 (일반 모드)", use_container_width=True):
+                    st.query_params.clear()
+                    st.rerun()
 
-        # --- 1. 상단: 공지사항 ---
+        st.subheader("📌 공지사항")
         if notice_posts:
-            st.subheader("📌 공지사항")
             for post in notice_posts:
                 post_title = post.get('title') or post.get('nickname', '공지사항')
                 st.markdown(f"""
@@ -441,57 +616,32 @@ try:
                 </div>
                 """, unsafe_allow_html=True)
             st.markdown("<br>", unsafe_allow_html=True)
+        else:
+            st.info("현재 등록된 공지사항이 없습니다.")
+            st.markdown("<br>", unsafe_allow_html=True)
 
-        # --- 2. 중단: 이벤트 진행 중인 기획전 ---
         st.subheader("📢 [이벤트] 진행 중인 기획전")
         if event_posts:
             for post in event_posts:
                 post_title = post.get('title') or post.get('nickname', '기획전')
+                loc = post.get('location', '')
+                display_title = f"[{loc}] {post_title}" if loc and loc not in ['공지사항', '기획전'] else post_title
+                
                 st.markdown(f"""
                 <div style="padding: 10px 5px; border-bottom: 1px solid #f0f0f0;">
                     <a href="?post_id={post['id']}" target="_self" style="text-decoration: none; color: #1976d2; font-size: 16px; font-weight: 500; display: block;">
-                        🎉 {post_title}
+                        🎉 {display_title}
                     </a>
                 </div>
                 """, unsafe_allow_html=True)
+            st.markdown("<br>", unsafe_allow_html=True)
         else:
             st.info("현재 진행 중인 특별 기획전이 없습니다.")
-        st.markdown("<br>", unsafe_allow_html=True)
+            st.markdown("<br>", unsafe_allow_html=True)
 
-        # --- 3. 하단: 우리 동네 실시간 소통방 ---
         st.subheader("💬 우리 동네 실시간 소통방 (꿀팁 공유)")
-        
-        with st.expander("✍️ 나도 실시간 꿀팁 남기기", expanded=False):
-            with st.form("community_post"):
-                col_info1, col_info2, col_info3 = st.columns(3)
-                with col_info1:
-                    user_name = st.text_input("닉네임", placeholder="예: 광명알뜰맘")
-                with col_info2:
-                    user_loc = st.text_input("동네 마트 위치", placeholder="예: 미금역 농협하나로마트")
-                with col_info3:
-                    user_pw = st.text_input("비밀번호 (글 삭제용)", type="password", placeholder="숫자 4자리")
-                
-                user_title = st.text_input("글 제목", placeholder="예: 오늘 이마트 대박 세일 정보 공유해요!")
-                user_msg = st.text_area("상세 내용", placeholder="자세한 세일 정보를 공유해주세요.")
-                
-                submitted = st.form_submit_button("📢 동네 사람들에게 공유하기", type="primary", use_container_width=True)
-                if submitted:
-                    if user_name and user_title and user_msg and user_loc and user_pw:
-                        try:
-                            supabase.table("community_posts").insert({
-                                "nickname": user_name,
-                                "location": user_loc,
-                                "title": user_title,
-                                "content": user_msg,
-                                "password": user_pw
-                            }).execute()
-                            fetch_community_posts.clear() 
-                            st.success("소중한 꿀팁 감사합니다! 실시간 목록에 반영되었습니다.")
-                            st.rerun()
-                        except Exception as e:
-                            st.error("🚨 저장 실패! Supabase에 'title' 열을 추가하셨는지 확인해주세요.")
-                    else:
-                        st.warning("닉네임, 마트 위치, 비밀번호, 제목, 정보를 모두 입력해 주세요.")
+        if st.button("✍️ 나도 실시간 꿀팁 남기기", type="primary"):
+            user_write_dialog()
 
         if not user_posts:
             st.info("아직 등록된 동네 꿀팁이 없습니다. 첫 번째 꿀팁을 남겨주세요!")
@@ -510,7 +660,10 @@ try:
                 </div>
                 """, unsafe_allow_html=True)
             
-    with tab3:
+    # ==============================================================
+    # 탭 3. 장보기 전 목표가 판독기 
+    # ==============================================================
+    elif st.session_state["current_tab"] == "🎯 3. 장보기 전 목표가 판독기":
         st.header("🎯 장보기 전 필수! '호구 방지' 목표가 판독기")
         st.markdown("마트 가기 전 미리 확인하세요! 내가 사려는 물건, 도대체 **얼마면 잘 샀다고 소문이 날지** 빅데이터로 기준을 잡아드립니다.")
         st.write("---")
